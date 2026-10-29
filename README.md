@@ -5,6 +5,8 @@ camera to the `realsense2_camera` ROS 2 wrapper **4.59.1** (upstream
 removed the T265 code paths after the last T265-capable release,
 4.54.1).
 
+<img width="2356" height="2144" alt="Screenshot From 2026-10-29 21-02-51" src="https://github.com/user-attachments/assets/710f151d-6338-4019-80ab-ff026c3572f8" />
+
 | File | What it is |
 |---|---|
 | `t265-ros-port-v4.59.1.patch` | 11 source files (+150/−1); plain text; **no binaries** |
