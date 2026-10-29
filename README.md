@@ -51,13 +51,13 @@ repository (https://github.com/realsenseai/realsense-ros).
 
 The wrapper must be built and run against a **T265-capable librealsense
 SDK** (the stock v2.59.1 SDK has no T265 device support and will not
-see the camera). The companion patch
-`librealsense-t265-v2.59.1` (T265 port for the v2.59.1 SDK) provides
-that SDK.
+see the camera). The companion patch kit `ntsarb/librealsense-t265-v2.59.1`
+provides that SDK.
 
-There is also a Qt6 demo viewer for the T265 (3-D trajectory, fisheye images,
-IMU strips, CSV export; runs against the SDK directly or against this
-wrapper's ROS 2 topics): `ntsarb/t265-demo`.
+## Related projects
+
+* [`ntsarb/librealsense-t265-v2.59.1`](https://github.com/ntsarb/librealsense-t265-v2.59.1) — restores T265 support to the librealsense v2.59.1 SDK (upstream removed it in v2.54.1).
+* [`ntsarb/T265-demo`](https://github.com/ntsarb/T265-demo) — a Qt6 viewer for the T265 (3-D trajectory, fisheye images, IMU strips, CSV export); works directly with the SDK or with the wrapper's ROS 2 topics.
 
 ## Building the patched wrapper
 
