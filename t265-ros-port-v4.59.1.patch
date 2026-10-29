@@ -1,0 +1,317 @@
+diff --git a/realsense2_camera/include/base_realsense_node.h b/realsense2_camera/include/base_realsense_node.h
+index b0fff2fd..e1947e3b 100755
+--- a/realsense2_camera/include/base_realsense_node.h
++++ b/realsense2_camera/include/base_realsense_node.h
+@@ -49,6 +49,9 @@
+ #include <sensor_msgs/msg/image.hpp>
+ #include <sensor_msgs/msg/imu.hpp>
+ #include <nav_msgs/msg/occupancy_grid.hpp>
++#include <nav_msgs/msg/odometry.hpp>
++#include <geometry_msgs/msg/pose_stamped.hpp>
++#include <geometry_msgs/msg/transform_stamped.hpp>
+ 
+ #if defined(HUMBLE) || defined(IRON) || defined(JAZZY) || defined(FOXY) 
+ #include <tf2/LinearMath/Quaternion.h>
+@@ -323,6 +326,7 @@ namespace realsense2_camera
+         void imu_callback(rs2::frame frame);
+         void imu_callback_sync(rs2::frame frame, imu_sync_method sync_method=imu_sync_method::COPY);
+         void multiple_message_callback(rs2::frame frame, imu_sync_method sync_method);
++        void pose_callback(rs2::frame frame);
+         void frame_callback(rs2::frame frame);
+         
+         void startDiagnosticsUpdater();
+@@ -377,6 +381,7 @@ namespace realsense2_camera
+         rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr _occupancy_publisher;
+         rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr _occupancy_certainty_publisher;
+         std::map<stream_index_pair, rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr> _imu_publishers;
++        std::shared_ptr<rclcpp::Publisher<nav_msgs::msg::Odometry>> _odom_publisher;
+         std::shared_ptr<SyncedImuPublisher> _synced_imu_publisher;
+         std::map<stream_index_pair, rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr> _info_publishers;
+         std::map<stream_index_pair, rclcpp::Publisher<realsense2_camera_msgs::msg::Metadata>::SharedPtr> _metadata_publishers;
+@@ -403,6 +408,7 @@ namespace realsense2_camera
+         bool _is_accel_enabled;
+         bool _is_gyro_enabled;
+         bool _pointcloud;
++        bool _publish_odom_tf;
+         imu_sync_method _imu_sync_method;
+         std::deque<CimuData> _imu_history;
+         std::mutex _imu_callback_mutex;
+diff --git a/realsense2_camera/include/constants.h b/realsense2_camera/include/constants.h
+index 834f8bd6..d367004f 100644
+--- a/realsense2_camera/include/constants.h
++++ b/realsense2_camera/include/constants.h
+@@ -85,8 +85,10 @@ namespace realsense2_camera
+     const std::string HID_QOS         = "SENSOR_DATA";
+ 
+     const bool HOLD_BACK_IMU_FOR_FRAMES = false;
++    const bool PUBLISH_ODOM_TF = true;
+ 
+     const std::string DEFAULT_BASE_FRAME_ID            = "link";
++    const std::string DEFAULT_ODOM_FRAME_ID            = "odom_frame";
+     const std::string DEFAULT_IMU_OPTICAL_FRAME_ID     = "camera_imu_optical_frame";
+ 
+     const float ROS_DEPTH_SCALE = 0.001;
+diff --git a/realsense2_camera/include/profile_manager.h b/realsense2_camera/include/profile_manager.h
+index 61e8ef88..854b7040 100644
+--- a/realsense2_camera/include/profile_manager.h
++++ b/realsense2_camera/include/profile_manager.h
+@@ -104,4 +104,11 @@ namespace realsense2_camera
+         protected:
+             std::map<stream_index_pair, std::shared_ptr<int> > _fps;
+     };
++
++    class PoseProfilesManager : public MotionProfilesManager
++    {
++        public:
++            using MotionProfilesManager::MotionProfilesManager;
++            void registerProfileParameters(std::vector<stream_profile> all_profiles, std::function<void()> update_sensor_func) override;
++    };
+ }
+diff --git a/realsense2_camera/include/ros_utils.h b/realsense2_camera/include/ros_utils.h
+index 40b960df..8d48b375 100644
+--- a/realsense2_camera/include/ros_utils.h
++++ b/realsense2_camera/include/ros_utils.h
+@@ -31,8 +31,12 @@ namespace realsense2_camera
+     const stream_index_pair INFRA0{RS2_STREAM_INFRARED, 0};
+     const stream_index_pair INFRA1{RS2_STREAM_INFRARED, 1};
+     const stream_index_pair INFRA2{RS2_STREAM_INFRARED, 2};
++    const stream_index_pair FISHEYE{RS2_STREAM_FISHEYE, 0};
++    const stream_index_pair FISHEYE1{RS2_STREAM_FISHEYE, 1};
++    const stream_index_pair FISHEYE2{RS2_STREAM_FISHEYE, 2};
+     const stream_index_pair GYRO{RS2_STREAM_GYRO, 0};
+     const stream_index_pair ACCEL{RS2_STREAM_ACCEL, 0};
++    const stream_index_pair POSE{RS2_STREAM_POSE, 0};
+     const stream_index_pair SAFETY{RS2_STREAM_SAFETY, 0};
+     const stream_index_pair LABELED_POINT_CLOUD{RS2_STREAM_LABELED_POINT_CLOUD, 0};
+     const stream_index_pair OCCUPANCY{RS2_STREAM_OCCUPANCY, 0};
+diff --git a/realsense2_camera/launch/rs_launch.py b/realsense2_camera/launch/rs_launch.py
+index 8d8d5a6e..77042e4a 100644
+--- a/realsense2_camera/launch/rs_launch.py
++++ b/realsense2_camera/launch/rs_launch.py
+@@ -41,6 +41,8 @@ configurable_parameters = [{'name': 'camera_name',                  'default': '
+                            {'name': 'enable_infra',                 'default': 'false', 'description': 'enable infra0 stream'},
+                            {'name': 'enable_infra1',                'default': 'false', 'description': 'enable infra1 stream'},
+                            {'name': 'enable_infra2',                'default': 'false', 'description': 'enable infra2 stream'},
++                           {'name': 'enable_fisheye1',              'default': 'true', 'description': 'enable fisheye1 stream'},
++                           {'name': 'enable_fisheye2',              'default': 'true', 'description': 'enable fisheye2 stream'},
+                            {'name': 'depth_module.depth_profile',   'default': '0,0,0', 'description': 'depth stream profile'},
+                            {'name': 'depth_module.depth_format',    'default': 'Z16', 'description': 'depth stream format'},
+                            {'name': 'depth_module.infra_profile',   'default': '0,0,0', 'description': 'infra streams (0/1/2) profile'},
+@@ -65,6 +67,8 @@ configurable_parameters = [{'name': 'camera_name',                  'default': '
+                            {'name': 'enable_motion',                'default': 'false', 'description': "'enable motion stream (IMU) for DDS devices'"},
+                            {'name': 'gyro_fps',                     'default': '0', 'description': "''"},
+                            {'name': 'accel_fps',                    'default': '0', 'description': "''"},
++                           {'name': 'enable_pose',                  'default': 'true', 'description': "''"},
++                           {'name': 'pose_fps',                     'default': '200', 'description': "''"},
+                            {'name': 'motion_fps',                   'default': '0', 'description': "'motion stream samples per second'"},
+                            {'name': 'unite_imu_method',             'default': "0", 'description': '[0-None, 1-copy, 2-linear_interpolation]'},
+                            {'name': 'clip_distance',                'default': '-2.', 'description': "''"},
+diff --git a/realsense2_camera/src/base_realsense_node.cpp b/realsense2_camera/src/base_realsense_node.cpp
+index 674b9014..a04b081f 100755
+--- a/realsense2_camera/src/base_realsense_node.cpp
++++ b/realsense2_camera/src/base_realsense_node.cpp
+@@ -123,6 +123,7 @@ BaseRealSenseNode::BaseRealSenseNode(RosNodeBase& node,
+     _is_accel_enabled(false),
+     _is_gyro_enabled(false),
+     _pointcloud(false),
++    _publish_odom_tf(false),
+     _imu_sync_method(imu_sync_method::NONE),
+     _is_profile_changed(false),
+     _is_align_depth_changed(false),
+@@ -703,6 +704,9 @@ void BaseRealSenseNode::multiple_message_callback(rs2::frame frame, imu_sync_met
+             if (sync_method > imu_sync_method::NONE) imu_callback_sync(frame, sync_method);
+             else imu_callback(frame);
+             break;
++        case RS2_STREAM_POSE:
++            pose_callback(frame);
++            break;
+         default:
+             frame_callback(frame);
+     }
+@@ -880,7 +884,7 @@ void BaseRealSenseNode::updateExtrinsicsCalibData(const rs2::video_stream_profil
+ 
+ void BaseRealSenseNode::SetBaseStream()
+ {
+-    const std::vector<stream_index_pair> base_stream_priority = {DEPTH};
++    const std::vector<stream_index_pair> base_stream_priority = {DEPTH, POSE};
+     std::set<stream_index_pair> checked_sips;
+     std::map<stream_index_pair, rs2::stream_profile> available_profiles;
+     for(auto&& sensor : _available_ros_sensors)
+diff --git a/realsense2_camera/src/parameters.cpp b/realsense2_camera/src/parameters.cpp
+index dfa066cc..470cd2e6 100644
+--- a/realsense2_camera/src/parameters.cpp
++++ b/realsense2_camera/src/parameters.cpp
+@@ -88,6 +88,10 @@ void BaseRealSenseNode::getParameters()
+     _hold_back_imu_for_frames = _parameters->setParam<bool>(param_name, HOLD_BACK_IMU_FOR_FRAMES);
+     _parameters_names.push_back(param_name);
+ 
++    param_name = std::string("publish_odom_tf");
++    _publish_odom_tf = _parameters->setParam<bool>(param_name, PUBLISH_ODOM_TF);
++    _parameters_names.push_back(param_name);
++
+     param_name = std::string("base_frame_id");
+     _base_frame_id = _parameters->setParam<std::string>(param_name, DEFAULT_BASE_FRAME_ID);
+     _base_frame_id = (static_cast<std::ostringstream&&>(std::ostringstream() << _camera_name << "_" << _base_frame_id)).str();
+diff --git a/realsense2_camera/src/profile_manager.cpp b/realsense2_camera/src/profile_manager.cpp
+index 4135a884..09f998b3 100644
+--- a/realsense2_camera/src/profile_manager.cpp
++++ b/realsense2_camera/src/profile_manager.cpp
+@@ -693,3 +693,21 @@ void MotionProfilesManager::registerFPSParams()
+     }
+ }
+ 
++
++///////////////////////////////////////////////////////////////////////////////////////
++
++void PoseProfilesManager::registerProfileParameters(std::vector<stream_profile> all_profiles, std::function<void()> update_sensor_func)
++{
++    std::set<stream_index_pair> checked_sips;
++    for (auto& profile : all_profiles)
++    {
++        if (!profile.is<pose_stream_profile>()) continue;
++        _all_profiles.push_back(profile);
++        stream_index_pair sip(profile.stream_type(), profile.stream_index());
++        checked_sips.insert(sip);
++    }
++    registerSensorUpdateParam("enable_%s", checked_sips, _enabled_profiles, true, update_sensor_func);
++    registerSensorUpdateParam("%s_fps", checked_sips, _fps, 0, update_sensor_func);
++    registerSensorQOSParam("%s_qos", checked_sips, _profiles_image_qos_str, HID_QOS);
++    registerSensorQOSParam("%s_info_qos", checked_sips, _profiles_info_qos_str, DEFAULT_QOS);
++}
+diff --git a/realsense2_camera/src/ros_sensor.cpp b/realsense2_camera/src/ros_sensor.cpp
+index fd95c728..9048491b 100644
+--- a/realsense2_camera/src/ros_sensor.cpp
++++ b/realsense2_camera/src/ros_sensor.cpp
+@@ -250,6 +250,12 @@ void RosSensor::registerSensorParameters()
+     {
+         _profile_managers.push_back(profile_manager);
+     }
++    profile_manager = std::make_shared<PoseProfilesManager>(_params.getParameters(), _logger);
++    profile_manager->registerProfileParameters(all_profiles, _update_sensor_func);
++    if (profile_manager->isTypeExist())
++    {
++        _profile_managers.push_back(profile_manager);
++    }
+ }
+ 
+ bool RosSensor::start(const std::vector<stream_profile>& profiles)
+diff --git a/realsense2_camera/src/rs_node_setup.cpp b/realsense2_camera/src/rs_node_setup.cpp
+index 6f844069..e34727cd 100755
+--- a/realsense2_camera/src/rs_node_setup.cpp
++++ b/realsense2_camera/src/rs_node_setup.cpp
+@@ -179,6 +179,11 @@ void BaseRealSenseNode::setAvailableSensors()
+             ROS_DEBUG_STREAM("Set " << module_name << " as ImuSensor.");
+             rosSensor = std::make_unique<RosSensor>(sensor, _parameters, imu_callback_function, update_sensor_func, hardware_reset_func, _diagnostics_updater, _logger, false, _dev.is<playback>());
+         }
++        else if (sensor.is<rs2::pose_sensor>())
++        {
++            ROS_DEBUG_STREAM("Set " << module_name << " as PoseSensor.");
++            rosSensor = std::make_unique<RosSensor>(sensor, _parameters, multiple_message_callback_function, update_sensor_func, hardware_reset_func, _diagnostics_updater, _logger, false, _dev.is<playback>());
++        }
+         else
+         {
+             ROS_WARN_STREAM("Module Name \"" << module_name << "\" does not define a callback.");
+@@ -365,6 +370,13 @@ void BaseRealSenseNode::startPublishers(const std::vector<stream_profile>& profi
+             IMUInfo info_msg = getImuInfo(profile);
+             _imu_info_publishers[sip]->publish(info_msg);
+         }
++        else if (profile.is<rs2::pose_stream_profile>())
++        {
++            std::stringstream data_topic_name, info_topic_name;
++            data_topic_name << "~/" << stream_name << "/sample";
++            _odom_publisher = _node.create_publisher<nav_msgs::msg::Odometry>(data_topic_name.str(),
++                rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(qos), qos));
++        }
+         std::string topic_metadata("~/" + stream_name + "/metadata");
+         _metadata_publishers[sip] = _node.create_publisher<realsense2_camera_msgs::msg::Metadata>(topic_metadata, 
+             rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(info_qos), info_qos));
+diff --git a/realsense2_camera/src/tfs.cpp b/realsense2_camera/src/tfs.cpp
+index e9c7af30..67a69d33 100644
+--- a/realsense2_camera/src/tfs.cpp
++++ b/realsense2_camera/src/tfs.cpp
+@@ -323,3 +323,85 @@ void BaseRealSenseNode::startDynamicTf()
+     }
+ }
+ 
++
++void BaseRealSenseNode::pose_callback(rs2::frame frame)
++{
++    ROS_DEBUG("Frame arrived: stream: %s ; index: %d ; Timestamp Domain: %s",
++                ros_stream_to_string(frame.get_profile().stream_type()).c_str(),
++                frame.get_profile().stream_index(),
++                rs2_timestamp_domain_to_string(frame.get_frame_timestamp_domain()));
++
++    rs2_pose pose = frame.as<rs2::pose_frame>().get_pose_data();
++    rclcpp::Time t(frameSystemTimeSec(frame));
++
++    geometry_msgs::msg::PoseStamped pose_msg;
++    pose_msg.pose.position.x = -pose.translation.z;
++    pose_msg.pose.position.y = -pose.translation.x;
++    pose_msg.pose.position.z = pose.translation.y;
++    pose_msg.pose.orientation.x = -pose.rotation.z;
++    pose_msg.pose.orientation.y = -pose.rotation.x;
++    pose_msg.pose.orientation.z = pose.rotation.y;
++    pose_msg.pose.orientation.w = pose.rotation.w;
++
++    static tf2_ros::TransformBroadcaster br(_node);
++    geometry_msgs::msg::TransformStamped msg;
++    msg.header.stamp = t;
++    msg.header.frame_id = DEFAULT_ODOM_FRAME_ID;
++    msg.child_frame_id = FRAME_ID(POSE);
++    msg.transform.translation.x = pose_msg.pose.position.x;
++    msg.transform.translation.y = pose_msg.pose.position.y;
++    msg.transform.translation.z = pose_msg.pose.position.z;
++    msg.transform.rotation.x = pose_msg.pose.orientation.x;
++    msg.transform.rotation.y = pose_msg.pose.orientation.y;
++    msg.transform.rotation.z = pose_msg.pose.orientation.z;
++    msg.transform.rotation.w = pose_msg.pose.orientation.w;
++
++    if (_publish_odom_tf) br.sendTransform(msg);
++
++    if (0 != _odom_publisher->get_subscription_count())
++    {
++        double cov_pose(_linear_accel_cov * pow(10, 3-(int)pose.tracker_confidence));
++        double cov_twist(_angular_velocity_cov * pow(10, 1-(int)pose.tracker_confidence));
++
++        geometry_msgs::msg::Vector3Stamped v_msg;
++        tf2::Vector3 tfv(-pose.velocity.z, -pose.velocity.x, pose.velocity.y);
++        tf2::Quaternion q(-msg.transform.rotation.x,
++                          -msg.transform.rotation.y,
++                          -msg.transform.rotation.z,
++                           msg.transform.rotation.w);
++        tfv=tf2::quatRotate(q,tfv);
++        v_msg.vector.x = tfv.x();
++        v_msg.vector.y = tfv.y();
++        v_msg.vector.z = tfv.z();
++
++        tfv = tf2::Vector3(-pose.angular_velocity.z, -pose.angular_velocity.x, pose.angular_velocity.y);
++        tfv=tf2::quatRotate(q,tfv);
++        geometry_msgs::msg::Vector3Stamped om_msg;
++        om_msg.vector.x = tfv.x();
++        om_msg.vector.y = tfv.y();
++        om_msg.vector.z = tfv.z();
++
++        nav_msgs::msg::Odometry odom_msg;
++
++        odom_msg.header.frame_id = DEFAULT_ODOM_FRAME_ID;
++        odom_msg.child_frame_id = FRAME_ID(POSE);
++        odom_msg.header.stamp = t;
++        odom_msg.pose.pose = pose_msg.pose;
++        odom_msg.pose.covariance = {cov_pose, 0, 0, 0, 0, 0,
++                                    0, cov_pose, 0, 0, 0, 0,
++                                    0, 0, cov_pose, 0, 0, 0,
++                                    0, 0, 0, cov_twist, 0, 0,
++                                    0, 0, 0, 0, cov_twist, 0,
++                                    0, 0, 0, 0, 0, cov_twist};
++        odom_msg.twist.twist.linear = v_msg.vector;
++        odom_msg.twist.twist.angular = om_msg.vector;
++        odom_msg.twist.covariance ={cov_pose, 0, 0, 0, 0, 0,
++                                    0, cov_pose, 0, 0, 0, 0,
++                                    0, 0, cov_pose, 0, 0, 0,
++                                    0, 0, 0, cov_twist, 0, 0,
++                                    0, 0, 0, 0, cov_twist, 0,
++                                    0, 0, 0, 0, 0, cov_twist};
++        _odom_publisher->publish(odom_msg);
++        ROS_DEBUG("Publish %s stream", ros_stream_to_string(frame.get_profile().stream_type()).c_str());
++    }
++}
